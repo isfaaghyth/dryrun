@@ -4,6 +4,8 @@ require 'fileutils'
 require 'dryrun/github'
 require 'dryrun/version'
 require 'dryrun/android_project'
+require 'dryrun/install_application_command'
+require 'dryrun/test_application_command'
 require 'dryrun/device'
 require 'highline/import'
 require 'openssl'
@@ -25,6 +27,7 @@ module Dryrun
       @branch = 'master'
       @devices = []
       @cleanup = false
+      @command = InstallApplicationCommand.new
 
       # Parse Options
       create_options_parser(arguments)
@@ -74,6 +77,10 @@ module Dryrun
           exit
         end
 
+        opts.on('-a', '--android-test', 'Execute android tests') do
+          @command = TestApplicationCommand.new
+        end
+
         opts.parse!
       end
     end
@@ -87,7 +94,7 @@ module Dryrun
         input = ask "\n#{'Your Dryrun version is outdated, want to update?'.yellow} #{'[Y/n]:'.white}"
       end until %w(y n s).include?(input.downcase)
 
-      DryrunUtils.execute('gem update dryrun') if input.casecmp 'y'
+      DryrunUtils.execute('gem update dryrun') if input.casecmp('y') == 0
     end
 
     def pick_device
@@ -118,7 +125,7 @@ module Dryrun
       if @devices.size >= 2
         puts 'Pick your device (1,2,3...):'
 
-        @devices.each_with_index.map { |key, index| puts "#{index.to_s.green} -  #{key.name} \n" }
+        @devices.each_with_index.map {|key, index| puts "#{index.to_s.green} -  #{key.name} \n"}
 
         input = gets.chomp
 
@@ -198,7 +205,7 @@ module Dryrun
       puts "Using custom module: #{@custom_module.green}" if @custom_module
 
       # clean and install the apk
-      android_project.install
+      android_project.execute_command(@command)
 
       puts "\n> If you want to remove the app you just installed, execute:\n#{android_project.uninstall_command.yellow}\n\n"
     end

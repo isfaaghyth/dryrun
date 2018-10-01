@@ -3,6 +3,8 @@ require 'fileutils'
 require 'tempfile'
 require 'find'
 require_relative 'dryrun_utils'
+require_relative 'manifest_parser'
+require_relative 'gradle_adapter'
 
 module Dryrun
   class AndroidProject
@@ -52,7 +54,8 @@ module Dryrun
 
       # Write good lines to temporary file
       File.open(file, 'r') do |f|
-        f.each do |l| tmp << l unless l.include? 'applicationId'
+        f.each do |l|
+          tmp << l unless l.include? 'applicationId'
         end
       end
       tmp.close
@@ -71,7 +74,7 @@ module Dryrun
 
     def valid?(main_gradle_file = @main_gradle_file)
       File.exist?(main_gradle_file) &&
-      File.exist?(@settings_gradle_path)
+          File.exist?(@settings_gradle_path)
     end
 
     def find_modules
@@ -79,111 +82,65 @@ module Dryrun
 
       content = File.open(@settings_gradle_path, 'rb').read
       modules = content.scan(/'([^']*)'/)
-      modules.each { |replacement| replacement.first.tr!(':', '/') }
+      modules.each {|replacement| replacement.first.tr!(':', '')}
     end
 
-    def install
+    def execute_command(command)
       Dir.chdir @base_path
 
-      path, execute_line = sample_project
-
-      if path == false && execute_line == false
-        puts "Couldn't open the sample project, sorry!".red
+      path = sample_project
+      if path == false or !@launcher_activity
+        puts "Couldn't open or there isnt any sample project, sorry!".red
         exit 1
       end
 
-      builder = 'gradle'
-
-      if File.exist?('gradlew')
-        if !Gem.win_platform?
-          DryrunUtils.execute('chmod +x gradlew')
-        else
-          DryrunUtils.execute('icacls gradlew /T')
-        end
-        builder = './gradlew'
-      end
-
-      # Generate the gradle/ folder
-      DryrunUtils.execute('gradle wrap') if File.exist?('gradlew') && !gradle_wrapped?
+      builder = create_builder
 
       remove_application_id
       remove_local_properties
 
-      if @custom_module
-        DryrunUtils.execute("#{builder} clean")
-        DryrunUtils.execute("#{builder} :#{@custom_module}:install#{@flavour}Debug")
-      else
-        DryrunUtils.execute("#{builder} clean")
-
-        if @device.nil?
-          puts 'No devices picked/available, proceeding with assemble instead'.green
-          puts "#{builder} assemble#{@flavour}Debug"
-          DryrunUtils.execute("#{builder} assemble#{@flavour}Debug")
-        else
-          puts "#{builder} install#{@flavour}Debug"
-          DryrunUtils.execute("#{builder} install#{@flavour}Debug")
-        end
-      end
-
-      unless @device.nil?
-        clear_app_data
-        puts "Installing #{@package.green}...\n"
-        puts "executing: #{execute_line.green}\n"
-
-        DryrunUtils.run_adb("shell #{execute_line}")
-      end
+      command.run(builder, @package, @launcher_activity, @custom_module, @flavour, @device)
     end
 
     def gradle_wrapped?
       return false unless File.directory?('gradle/')
 
       File.exist?('gradle/wrapper/gradle-wrapper.properties') &&
-        File.exist?('gradle/wrapper/gradle-wrapper.jar')
+          File.exist?('gradle/wrapper/gradle-wrapper.jar')
     end
 
     def sample_project
-      if @custom_module && @modules.any? { |m| m.first == "/#{@custom_module}" }
-        @path_to_sample = File.join(@base_path, "/#{@custom_module}")
-        return @path_to_sample, get_execution_line_command(@path_to_sample)
+      if @custom_module && @modules.any? {|m| m.first == "#{@custom_module}"}
+        @path_to_sample = File.join(@base_path, "#{@custom_module}")
+        return @path_to_sample
       else
         @modules.each do |child|
           full_path = File.join(@base_path, child.first)
           @path_to_sample = full_path
-
-          execution_line_command = get_execution_line_command(full_path)
-          return full_path, execution_line_command if execution_line_command
+          return full_path if parse_manifest(full_path)
         end
       end
-      [false, false]
+      false
     end
 
     def uninstall_command
       "adb uninstall \"#{@package}\""
     end
 
-    def clear_app_data
-      DryrunUtils.run_adb("shell pm clear #{@package}")
-    end
-
     def uninstall_application
       DryrunUtils.run_adb("shell pm uninstall #{@package}")
     end
 
-    def get_execution_line_command(path_to_sample)
+    def parse_manifest(path_to_sample)
       manifest_file = get_manifest(path_to_sample)
 
       return false if manifest_file.nil?
 
-      doc = Oga.parse_xml(manifest_file)
-
-      @package = get_package(doc)
-      @launcher_activity = get_launcher_activity(doc)
-
-      return false unless @launcher_activity
-
+      manifest_parser = ManifestParser.new(manifest_file)
+      @package = manifest_parser.package
+      @launcher_activity = manifest_parser.launcher_activity
       manifest_file.close
-
-      "am start -n \"#{launcheable_activity}\" -a android.intent.action.MAIN -c android.intent.category.LAUNCHER"
+      @launcher_activity && @package
     end
 
     def get_manifest(path_to_sample)
@@ -199,25 +156,21 @@ module Dryrun
       end
     end
 
-    def launcheable_activity
-      full_path_to_launcher = "#{@package}#{@launcher_activity.gsub(@package, '')}"
-      "#{@package}/#{full_path_to_launcher}"
-    end
+    def create_builder
+      builder = 'gradle'
 
-    def get_package(doc)
-      doc.xpath('//manifest').attr('package').first.value
-    end
-
-    def get_launcher_activity(doc)
-      activities = doc.css('activity')
-      activities.each do |child|
-        intent_filter = child.css('intent-filter')
-
-        if !intent_filter.nil? && !intent_filter.empty?
-          return child.attr('android:name').value
+      if File.exist?('gradlew')
+        if !Gem.win_platform?
+          DryrunUtils.execute('chmod +x gradlew')
+        else
+          DryrunUtils.execute('icacls gradlew /T')
         end
+        builder = './gradlew'
       end
-      false
+
+      # Generate the gradle/ folder
+      DryrunUtils.execute('gradle wrap') if File.exist?('gradlew') && !gradle_wrapped?
+      GradleAdapter.new(builder)
     end
   end
 end
